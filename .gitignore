@@ -1,0 +1,22 @@
+# OAuth private keys and generated config — never commit these
+private_key.pem
+public_key.pem
+*.pem
+.env
+
+# Go build output / test binaries
+/sample
+/setup
+/run
+/cleanup
+/newkey
+/registerkey
+*.exe
+*.test
+*.out
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
