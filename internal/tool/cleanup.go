@@ -61,10 +61,22 @@ func Cleanup(yes bool) error {
 	fmt.Printf("\n-- Deleting Application Identity account (userid: %s) --\n", oauthUserID)
 	resp := BuzzPost(server, "deleteusers",
 		map[string]any{"requests": map[string]any{"user": []any{map[string]any{"userid": oauthUserID}}}}, adminToken)
-	if ResponseCode(resp) == "OK" {
+	// The per-user outcome is authoritative.  The OUTER code is OK whenever the request
+	// was merely well formed, so checking it first would report success for a delete
+	// that was actually denied or whose target did not exist.
+	delItem := Item(resp)
+	delCode := delItem.Code
+	if delCode == "" {
+		delCode = ResponseCode(resp)
+	}
+	if delCode == "OK" {
 		fmt.Println("Application Identity account deleted.")
 	} else {
-		fmt.Fprintf(os.Stderr, "Warning: delete returned code %q. Continuing.\n", ResponseCode(resp))
+		detail := ""
+		if delItem.Message != "" {
+			detail = " - " + delItem.Message
+		}
+		fmt.Fprintf(os.Stderr, "Warning: delete returned code %q%s. Continuing.\n", delCode, detail)
 	}
 
 	fmt.Println("\n-- Removing local files --------------------------------")
