@@ -158,18 +158,27 @@ func envHint(env string) string {
 }
 
 // ── Buzz API calls ──────────────────────────────────────────────────────────
-// /cmd/* endpoints authenticate a session token via the _token query parameter.
-// /api/* (REST) endpoints authenticate via the Authorization: Bearer header.
+// Session tokens travel in an Authorization: Bearer header on both /cmd/* and /api/*
+// endpoints.  A _token query parameter is also accepted by /cmd/*, but a credential in
+// a URL is recorded by server and proxy access logs.
+// Buzz returns XML unless JSON is requested via Accept.
+
+func authHeaders(token string, extra map[string]string) map[string]string {
+	h := map[string]string{"Accept": "application/json"}
+	if token != "" {
+		h["Authorization"] = "Bearer " + token
+	}
+	for k, v := range extra {
+		h[k] = v
+	}
+	return h
+}
 
 func BuzzPost(server, cmd string, body any, token string) map[string]any {
 	u := server + "/cmd/" + cmd
-	if token != "" {
-		u += "?" + url.Values{"_token": {token}}.Encode()
-	}
 	data, _ := json.Marshal(body)
-	_, m := httpJSON(http.MethodPost, u, data, map[string]string{
-		"Content-Type": "application/json", "Accept": "application/json",
-	})
+	_, m := httpJSON(http.MethodPost, u, data,
+		authHeaders(token, map[string]string{"Content-Type": "application/json"}))
 	return m
 }
 
@@ -178,14 +187,11 @@ func BuzzGet(server, cmd string, params map[string]string, token string) map[str
 	for k, v := range params {
 		q.Set(k, v)
 	}
-	if token != "" {
-		q.Set("_token", token)
-	}
 	u := server + "/cmd/" + cmd
 	if enc := q.Encode(); enc != "" {
 		u += "?" + enc
 	}
-	_, m := httpJSON(http.MethodGet, u, nil, map[string]string{"Accept": "application/json"})
+	_, m := httpJSON(http.MethodGet, u, nil, authHeaders(token, nil))
 	return m
 }
 
@@ -266,8 +272,73 @@ func responseMessage(m map[string]any) string {
 	return ""
 }
 
+// ItemResult is the per-entity result of a multi-object command (CreateUsers2,
+// DeleteUsers).  Those commands report each entity's outcome under
+// response.responses.response, while the OUTER code is OK whenever the request was
+// merely well formed.  A per-entity AccessDenied therefore arrives inside an "OK"
+// envelope, so the outer code alone cannot tell you whether the entity was actually
+// created or deleted.  Code is "" when the response carries no per-entity result.
+type ItemResult struct {
+	Code    string
+	Message string
+	UserID  string
+}
+
+func Item(m map[string]any) ItemResult {
+	inner := m
+	if r, ok := m["response"].(map[string]any); ok {
+		inner = r
+	}
+	responses, ok := inner["responses"].(map[string]any)
+	if !ok {
+		return ItemResult{}
+	}
+	node, ok := responses["response"].(map[string]any)
+	if !ok {
+		if arr, ok := responses["response"].([]any); ok && len(arr) > 0 {
+			node, _ = arr[0].(map[string]any)
+		}
+	}
+	if node == nil {
+		return ItemResult{}
+	}
+	res := ItemResult{}
+	res.Code, _ = node["code"].(string)
+	res.Message, _ = node["message"].(string)
+	if u, ok := node["user"].(map[string]any); ok {
+		res.UserID, _ = u["userid"].(string)
+	}
+	return res
+}
+
+// SecondFactorToken returns the short-lived token login3 supplies alongside
+// SecondFactorRequired.  Observed shape: response.token, duplicated at
+// response.body.token.  There is no "user" node on that response, so
+// response.user.token (where the session token lives on a *successful* login) does not
+// exist yet.  remembermfa.token is deliberately ignored: it remembers a device and
+// cannot complete this login.
+func SecondFactorToken(m map[string]any) string {
+	inner := m
+	if r, ok := m["response"].(map[string]any); ok {
+		inner = r
+	}
+	if u, ok := inner["user"].(map[string]any); ok {
+		if t, ok := u["token"].(string); ok && t != "" {
+			return t
+		}
+	}
+	if t, ok := inner["token"].(string); ok && t != "" {
+		return t
+	}
+	if b, ok := inner["body"].(map[string]any); ok {
+		if t, ok := b["token"].(string); ok && t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
 // ── Admin login (login3, with optional MFA) ─────────────────────────────────────
-var mfaRe = regexp.MustCompile(`(?i)(factor|mfa|otp|challenge|verify|multifactor)`)
 var usernameRe = regexp.MustCompile(`^[^/]+/[^/]+$`)
 
 func AdminLogin(server string) string {
@@ -281,16 +352,38 @@ func AdminLogin(server string) string {
 		}, "")
 		code := ResponseCode(resp)
 
-		if code != "" && mfaRe.MatchString(code) {
-			fmt.Println(" MFA required.")
-			mfa := PromptRequired("MFA / one-time code", "", "BUZZ_ADMIN_MFA")
-			partial := nestedString(resp, "response", "token")
-			if partial == "" {
-				partial, _ = resp["token"].(string)
+		// Multi-factor authentication.  login3 answers SecondFactorRequired when the
+		// password was correct but the account has MFA configured, and returns a
+		// short-lived token that is presented in an Authorization: Bearer header to
+		// secondfactorauthenticate, which returns the real session token.  Putting the
+		// token in the request body instead is ignored: AccessDenied userId='-1'.
+		//   https://api.agilixbuzz.com/docs/entry/Command/Login3.md
+		//   https://api.agilixbuzz.com/docs/entry/Command/SecondFactorAuthenticate.md
+		if code == "SecondFactorConfigurationNowRequired" {
+			fmt.Print("\n  This account must configure multi-factor authentication before it can\n")
+			fmt.Print("  be used.  Complete MFA setup in Buzz, then re-run this script.\n")
+			if os.Getenv("BUZZ_ADMIN_PASSWORD") != "" {
+				Fail("Admin account requires multi-factor authentication setup.")
 			}
-			resp = BuzzPost(server, "verifylogin", map[string]any{
-				"request": map[string]any{"cmd": "verifylogin", "token": partial, "code": mfa},
-			}, "")
+			fmt.Print("  Press Ctrl+C to abort.\n\n")
+			continue
+		}
+
+		if code == "SecondFactorRequired" {
+			fmt.Println(" multi-factor authentication required.")
+			partial := SecondFactorToken(resp)
+			if partial == "" {
+				fmt.Print("\n  Buzz asked for a second factor but no token could be found in its reply.\n")
+				if os.Getenv("BUZZ_ADMIN_PASSWORD") != "" {
+					Fail("No second-factor token was returned.")
+				}
+				fmt.Print("  Press Ctrl+C to abort.\n\n")
+				continue
+			}
+			otp := PromptRequired("One-time code from your authenticator app or email", "", "BUZZ_ADMIN_MFA")
+			resp = BuzzPost(server, "secondfactorauthenticate", map[string]any{
+				"request": map[string]any{"cmd": "secondfactorauthenticate", "otp": otp},
+			}, partial)
 			code = ResponseCode(resp)
 		}
 

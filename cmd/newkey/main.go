@@ -41,6 +41,6 @@ func main() {
 	fmt.Println("  Private key : " + privPath)
 	fmt.Println("  Public key  : " + pubPath)
 	fmt.Println("\nNext step: register the public key with Buzz.")
-	fmt.Println("  go run ./cmd/registerkey -s https://api.agilixbuzz.com -u <userid> -k <kid> -p public_key.pem")
+	fmt.Println("  go run ./cmd/registerkey -s https://backgroundapi.agilixbuzz.com -u <userid> -k <kid> -p public_key.pem")
 	fmt.Println("\nIMPORTANT: Never commit private_key.pem to source control.")
 }

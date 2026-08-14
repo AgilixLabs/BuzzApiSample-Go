@@ -37,7 +37,7 @@ func Setup() error {
 
 	Section("Step 1: Buzz Server URL")
 	server := strings.TrimRight(
-		PromptRequired("Buzz API server URL (e.g. https://api.agilixbuzz.com)", "", EnvServerURL), "/")
+		PromptRequired("Buzz API server URL (e.g. https://backgroundapi.agilixbuzz.com)", "", EnvServerURL), "/")
 	fmt.Println("  Server: " + server)
 
 	Section("Step 2: Admin Login")
@@ -150,7 +150,10 @@ func getOrCreateAccount(server, adminToken string) string {
 				targetDomain = choice
 			}
 		} else {
-			fmt.Print(" (could not fetch domains)\n\n")
+			// An empty list is normal when the admin holds no ReadDomain right anywhere,
+			// or when the domain simply has no child domains.  Not an error -- just ask.
+			fmt.Print(" done\n\n")
+			fmt.Print("  No domains were listed for this account, so enter the target domain directly.\n")
 			targetDomain = PromptRequired("Domain id for the new account (e.g. //myschool or a numeric id)", "", "")
 		}
 	}
@@ -173,6 +176,22 @@ func getOrCreateAccount(server, adminToken string) string {
 	if ResponseCode(resp) != "OK" {
 		Fail("CreateUsers2 failed (code: %s).  Response: %v", ResponseCode(resp), resp)
 	}
+	// The outer OK only means the request parsed; CreateUsers2 reports the outcome for
+	// the user it created under responses.response, so a denial arrives inside an "OK"
+	// envelope and must be checked separately.
+	if item := Item(resp); item.Code != "" && item.Code != "OK" {
+		detail := ""
+		if item.Message != "" {
+			detail = " - " + item.Message
+		}
+		if item.Code == "AccessDenied" {
+			Fail("CreateUsers2 was denied (code: %s%s).\n"+
+				"  The admin account needs the CreateUser right on domain %s.\n"+
+				"  Grant it that right (and UpdateUser, so it can register the OAuth key), then re-run.",
+				item.Code, detail, targetDomain)
+		}
+		Fail("CreateUsers2 failed for the requested user (code: %s%s).", item.Code, detail)
+	}
 	userID := extractCreatedUserID(resp)
 	if userID == "" {
 		Fail("CreateUsers2 succeeded but returned no userid.  Response: %v", resp)
@@ -182,10 +201,17 @@ func getOrCreateAccount(server, adminToken string) string {
 }
 
 func listDomains(server, token string) [][2]string {
-	resp := BuzzGet(server, "getdomains", nil, token)
+	// ListDomains, not "getdomains" -- the latter is not a Buzz command and always
+	// answered "Unknown API command", so this silently returned nil on every run.
+	// domainid=0 means "every domain this account has ReadDomain rights on"; limit=0
+	// lifts the default 100-domain cap (capped server-side at 1000 for domainid=0).
+	//   https://api.agilixbuzz.com/docs/entry/Command/ListDomains.md
+	resp := BuzzGet(server, "listdomains", map[string]string{"domainid": "0", "limit": "0"}, token)
 	if ResponseCode(resp) != "OK" {
 		return nil
 	}
+	// When the account can read no domains the server answers OK with "domains":{},
+	// so every level has to tolerate a missing or empty node.
 	r, _ := resp["response"].(map[string]any)
 	doms, _ := r["domains"].(map[string]any)
 	var items []any
@@ -198,11 +224,8 @@ func listDomains(server, token string) [][2]string {
 	var out [][2]string
 	for _, it := range items {
 		if m, ok := it.(map[string]any); ok {
-			id := valStr(m["id"])
-			if id == "" {
-				id = valStr(m["domainid"])
-			}
-			out = append(out, [2]string{id, valStr(m["name"])})
+			// The Domain schema names the identifier "id"; "domainid" is what you *send*.
+			out = append(out, [2]string{valStr(m["id"]), valStr(m["name"])})
 		}
 	}
 	return out
@@ -230,11 +253,8 @@ func extractCreatedUserID(resp map[string]any) string {
 	if user == nil {
 		return ""
 	}
-	id := valStr(user["userid"])
-	if id == "" {
-		id = valStr(user["id"])
-	}
-	return id
+	// The CreateUsers2 response documents this as "userid".
+	return valStr(user["userid"])
 }
 
 func defaultKid() string {

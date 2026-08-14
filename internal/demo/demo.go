@@ -58,8 +58,9 @@ func runSample(client *buzzapi.Client, log buzzapi.Logger) error {
 	}
 	user := asMap(userNode["user"])
 
-	// This server returns the identifier as "id"; older servers use "userid".
-	userID := firstNonEmpty(str(user["userid"]), str(user["id"]))
+	// The User schema names this "id".  ("userid" is the CreateUsers2 *response* field
+	// for a newly created user - a different command, not an alias here.)
+	userID := str(user["id"])
 	domainID := str(user["domainid"])
 	log("info", fmt.Sprintf("Authenticated as user %s (%q, userid: %s)",
 		str(user["username"]), str(user["firstname"])+" "+str(user["lastname"]), userID))
@@ -116,11 +117,4 @@ func str(v any) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
-}
-
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }
