@@ -118,7 +118,7 @@ Choose a **Key ID** (`kid`), e.g. `2025-q2`. Allowed characters: ASCII letters, 
 
 ```bash
 go run ./cmd/registerkey \
-    -s https://api.agilixbuzz.com \
+    -s https://backgroundapi.agilixbuzz.com \
     -u 12345678 \
     -k 2025-q2 \
     -p public_key.pem
@@ -143,7 +143,7 @@ go run ./cmd/sample
 import "github.com/AgilixLabs/BuzzApiSample-Go/buzzapi"
 
 client, err := buzzapi.FromPEMFile(
-    "https://api.agilixbuzz.com",
+    "https://backgroundapi.agilixbuzz.com",
     "MyApp/1.0 (Go; MyApp; admin@example.com)",
     "12345678",        // oauthUserID
     "2025-q2",         // oauthKid
@@ -163,7 +163,7 @@ domain, err := client.VerifyResponse(domainResp, true)
 `JSONRequest(method, cmd, params, jsonBody, includeToken)` returns the parsed response as a
 `map[string]any` (params and jsonBody may be nil). `VerifyResponse(node, checkChildResponses)`
 returns a `*buzzapi.Error` unless `response.code == "OK"` (and recursively checks child responses
-from batch APIs).
+from multi-object commands such as CreateUsers2).
 
 ---
 
