@@ -9,6 +9,11 @@ import (
 	"github.com/AgilixLabs/BuzzApiSample-Go/internal/tool"
 )
 
+// Replace YOUR_APPLICATION_NAME with your application's name and version, such as "AcmeRosterSync/1.0".
+// It is how Agilix support identifies your integration. Do not include the word "Buzz": a User-Agent
+// containing it is treated as one of Agilix's own applications.
+const applicationName = YOUR_APPLICATION_NAME
+
 // Run loads configuration, builds a client, and runs the read-only demo:
 //
 //	getuser2  -> verify authentication and discover the home domain
@@ -21,7 +26,7 @@ func Run() error {
 		return fmt.Errorf("%w\n  Run setup:  go run ./cmd/run", err)
 	}
 
-	userAgent := fmt.Sprintf("BuzzApiClient/1.0.0 (Go; %s; %s)", cfg.ApplicationInformation, cfg.ContactInformation)
+	userAgent := fmt.Sprintf("%s (Go; %s; %s)", applicationName, cfg.ApplicationInformation, cfg.ContactInformation)
 
 	// Show info/warn/error; suppress debug tracing for a clean demo.
 	logger := func(level, message string) {

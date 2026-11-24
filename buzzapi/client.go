@@ -3,7 +3,8 @@
 // It authenticates with OAuth 2.0 JWT client credentials (RFC 6749 + RFC 7523),
 // obtains and refreshes Bearer access tokens automatically, retries transient
 // failures with exponential backoff, and handles throttling and backend pressure
-// (see ThrottledError).
+// (see ThrottledError). Requests Buzz refuses because they use something deprecated
+// are reported as a DeprecatedError and never retried.
 //
 // The package uses only the Go standard library — no third-party dependencies.
 package buzzapi
@@ -74,6 +75,36 @@ var noRetryStatus = map[int]bool{
 	501: true, 505: true, 506: true, 508: true, 510: true, 511: true,
 }
 
+// LegacyAPIHosts holds the original, single API endpoint, keyed in lower case. It is
+// deprecated for integrations: Buzz refuses it (code "ApiDeprecated") for users and
+// domains created after the deprecation was enforced. Use the background endpoint for
+// background processing, or the interactive endpoint for requests a user is waiting on.
+//
+//	https://interactiveapi.agilixbuzz.com/docs/entry/Concept/ApiDeprecation.md
+var LegacyAPIHosts = map[string]bool{"api.agilixbuzz.com": true}
+
+// deprecatedCode is the response code Buzz gives a request that used a deprecated
+// command, endpoint host name or kind of sign-in. It is never worth retrying.
+const deprecatedCode = "ApiDeprecated"
+
+// CheckServerURL returns serverURL trimmed (surrounding space and trailing slashes
+// removed), refusing a deprecated endpoint host name. It returns an *Error if the URL
+// names a host in LegacyAPIHosts.
+func CheckServerURL(serverURL string) (string, error) {
+	server := strings.TrimRight(strings.TrimSpace(serverURL), "/")
+	host := ""
+	if u, err := url.Parse(server); err == nil {
+		host = strings.ToLower(u.Hostname())
+	}
+	if LegacyAPIHosts[host] {
+		return "", newError("%s is deprecated for API integrations, and Buzz refuses it for new users and domains. "+
+			"Use the background endpoint (https://backgroundapi.agilixbuzz.com) for background processing, "+
+			"or the interactive endpoint (https://interactiveapi.agilixbuzz.com) for requests a user is waiting on. "+
+			"See 'API Deprecation' and 'API Time Limiting' in the Buzz API documentation.", host)
+	}
+	return server, nil
+}
+
 // Error is returned when a Buzz API call fails or returns a non-OK response code.
 type Error struct {
 	Message    string
@@ -83,6 +114,29 @@ type Error struct {
 func (e *Error) Error() string { return e.Message }
 
 func newError(format string, a ...any) *Error { return &Error{Message: fmt.Sprintf(format, a...)} }
+
+// DeprecatedError is returned when Buzz refuses a request because it used something
+// deprecated (response code "ApiDeprecated", or "unauthorized_client" from the OAuth
+// token endpoint).
+//
+// Deprecated commands, the api.agilixbuzz.com endpoint and password (Login3) sessions
+// for integration work keep working for existing users and domains, but are refused
+// for new ones. Never retry: the request is refused until the code is changed.
+//
+// It unwraps to an *Error, so existing errors.As(err, &buzzErr) handlers still catch it.
+type DeprecatedError struct {
+	Message    string
+	StatusCode int // HTTP status when the OAuth token endpoint refused the request, else 0
+
+	// ServerMessage is the server's own message, which says what to use instead.
+	// Empty if the server sent none.
+	ServerMessage string
+}
+
+func (e *DeprecatedError) Error() string { return e.Message }
+
+// Unwrap lets errors.As match a DeprecatedError as an *Error.
+func (e *DeprecatedError) Unwrap() error { return &Error{Message: e.Message, StatusCode: e.StatusCode} }
 
 // ThrottledError is returned when the Buzz API throttles a request (rate limit, time
 // limit, or backend pressure) and the client has run out of retries, or when items
@@ -178,7 +232,10 @@ func New(serverURL, userAgent, oauthUserID, oauthKid string, privateKey *rsa.Pri
 	if logger == nil {
 		logger = defaultLogger
 	}
-	server := strings.TrimRight(strings.TrimSpace(serverURL), "/")
+	server, err := CheckServerURL(serverURL)
+	if err != nil {
+		return nil, err
+	}
 	return &Client{
 		ServerURL:     server,
 		UserAgent:     userAgent,
@@ -228,7 +285,9 @@ func LoadPrivateKeyFromPEM(path string) (*rsa.PrivateKey, error) {
 //
 // params and jsonBody may be nil. It returns the parsed JSON object (an XML
 // response is converted to the same shape), or nil if the body was empty. If the
-// server keeps throttling the request, it returns a *ThrottledError.
+// server keeps throttling the request, it returns a *ThrottledError. A request Buzz
+// refuses as deprecated comes back as a normal response; VerifyResponse turns it into
+// a *DeprecatedError.
 func (c *Client) JSONRequest(method, cmd string, params map[string]string, jsonBody any, includeToken bool) (map[string]any, error) {
 	if includeToken {
 		if err := c.ensureToken(); err != nil {
@@ -277,7 +336,8 @@ func (c *Client) JSONRequest(method, cmd string, params map[string]string, jsonB
 // VerifyResponse verifies that a Buzz JSON response indicates success. It
 // returns an *Error if the response code is not "OK", or a *ThrottledError if
 // the code is a throttle code or (with checkChildResponses) any batch or
-// multi-object items were throttled.
+// multi-object items were throttled. A code of "ApiDeprecated", on the response or
+// (with checkChildResponses) on any item, gives a *DeprecatedError.
 func (c *Client) VerifyResponse(node map[string]any, checkChildResponses bool) (map[string]any, error) {
 	if node == nil {
 		c.log("error", "Buzz API call failed. Expected response.code to be OK, found: null")
@@ -297,6 +357,14 @@ func (c *Client) VerifyResponse(node map[string]any, checkChildResponses bool) (
 				Code:       code,
 				Response:   node,
 			}
+		}
+		if code == deprecatedCode {
+			message := getString(toVerify, "message")
+			detail := message
+			if detail == "" {
+				detail = string(redacted)
+			}
+			return nil, &DeprecatedError{Message: "Buzz refused a deprecated API: " + detail, ServerMessage: message}
 		}
 		return nil, newError("Buzz API call failed. Expected response.code to be OK, found: %s", redacted)
 	}
@@ -419,6 +487,21 @@ func (c *Client) authenticateLocked() error {
 					StatusCode: throttleStatus(resp.StatusCode, ""),
 					Code:       oauthError,
 					RetryAfter: serverWait,
+				}
+			}
+			// The token endpoint reports a deprecated endpoint host name in the OAuth
+			// error format. Retrying cannot help.
+			if oauthError == "unauthorized_client" {
+				c.log("error", fmt.Sprintf("OAuth token request failed: %d %s", resp.StatusCode, bodyBytes))
+				description := getString(errorJSON, "error_description")
+				detail := description
+				if detail == "" {
+					detail = string(bodyBytes)
+				}
+				return &DeprecatedError{
+					Message:       "Buzz refused the OAuth token request: " + detail,
+					StatusCode:    resp.StatusCode,
+					ServerMessage: description,
 				}
 			}
 			if retriesRemaining > 0 && statusAllowsRetry(resp.StatusCode) {
@@ -603,6 +686,13 @@ func (c *Client) requestWithRetry(method, cmd string, params map[string]string, 
 		// just as it would for the same error wrapped in HTTP 200. 401 is returned as an
 		// error instead so JSONRequest re-authenticates whether or not an envelope came with it.
 		if code != "" && !statusAllowsRetry(resp.StatusCode) && resp.StatusCode != http.StatusUnauthorized {
+			return envelope, nil
+		}
+
+		// A deprecated command, endpoint host name or kind of sign-in is refused until
+		// the code is changed, so it is never retried whatever the HTTP status: return
+		// the envelope so VerifyResponse reports the server's message.
+		if code == deprecatedCode {
 			return envelope, nil
 		}
 

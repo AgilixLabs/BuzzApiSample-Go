@@ -25,6 +25,8 @@ func Cleanup(yes bool) error {
 	if server == "" || oauthUserID == "" {
 		return fmt.Errorf(".env is missing required fields (server url, oauth user id)")
 	}
+	// Refuse a deprecated endpoint host name before anything else is asked for.
+	CheckServerURL(server)
 
 	fmt.Println("\n========================================================")
 	fmt.Println("  Buzz API Sample - Cleanup")
@@ -61,6 +63,9 @@ func Cleanup(yes bool) error {
 	fmt.Printf("\n-- Deleting Application Identity account (userid: %s) --\n", oauthUserID)
 	resp := BuzzPost(server, "deleteusers",
 		map[string]any{"requests": map[string]any{"user": []any{map[string]any{"userid": oauthUserID}}}}, adminToken)
+	// A deprecated endpoint or command is refused until the configuration is changed.
+	// Stop here, with .env still in place, rather than removing the local files.
+	FailIfDeprecated(resp)
 	// The per-user outcome is authoritative.  The OUTER code is OK whenever the request
 	// was merely well formed, so checking it first would report success for a delete
 	// that was actually denied or whose target did not exist.

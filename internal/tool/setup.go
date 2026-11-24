@@ -38,6 +38,8 @@ func Setup() error {
 	Section("Step 1: Buzz Server URL")
 	server := strings.TrimRight(
 		PromptRequired("Buzz API server URL (e.g. https://backgroundapi.agilixbuzz.com)", "", EnvServerURL), "/")
+	// Refuse a deprecated endpoint host name before anything else is asked for.
+	CheckServerURL(server)
 	fmt.Println("  Server: " + server)
 
 	Section("Step 2: Admin Login")
@@ -173,6 +175,7 @@ func getOrCreateAccount(server, adminToken string) string {
 
 	fmt.Printf("\nCreating Application Identity account '%s'...", username)
 	resp := BuzzPost(server, "createusers2", map[string]any{"requests": map[string]any{"user": []any{user}}}, adminToken)
+	FailIfDeprecated(resp)
 	if ResponseCode(resp) != "OK" {
 		Fail("CreateUsers2 failed (code: %s).  Response: %v", ResponseCode(resp), resp)
 	}
@@ -205,8 +208,9 @@ func listDomains(server, token string) [][2]string {
 	// answered "Unknown API command", so this silently returned nil on every run.
 	// domainid=0 means "every domain this account has ReadDomain rights on"; limit=0
 	// lifts the default 100-domain cap (capped server-side at 1000 for domainid=0).
-	//   https://api.agilixbuzz.com/docs/entry/Command/ListDomains.md
+	//   https://interactiveapi.agilixbuzz.com/docs/entry/Command/ListDomains.md
 	resp := BuzzGet(server, "listdomains", map[string]string{"domainid": "0", "limit": "0"}, token)
+	FailIfDeprecated(resp)
 	if ResponseCode(resp) != "OK" {
 		return nil
 	}

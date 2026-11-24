@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/AgilixLabs/BuzzApiSample-Go/buzzapi"
 	"github.com/AgilixLabs/BuzzApiSample-Go/internal/tool"
 )
 
@@ -31,7 +32,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Error: -s, -u, -k and -p are all required.")
 		os.Exit(1)
 	}
-	srv := strings.TrimRight(*server, "/")
+	// Refuse a deprecated endpoint host name before asking for a token.
+	srv, err := buzzapi.CheckServerURL(*server)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 	if !kidRe.MatchString(*kid) {
 		fmt.Fprintln(os.Stderr, "Error: invalid kid. Allowed: ASCII letters, digits, -, _, .  Max 128 chars.")
 		os.Exit(1)

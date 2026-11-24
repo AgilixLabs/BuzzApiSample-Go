@@ -27,6 +27,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/AgilixLabs/BuzzApiSample-Go/buzzapi"
 )
 
 const httpTimeout = 60 * time.Second
@@ -338,10 +340,48 @@ func SecondFactorToken(m map[string]any) string {
 	return ""
 }
 
+// ── Deprecated endpoints and APIs ───────────────────────────────────────────────
+
+// CheckServerURL stops with the reason if server names a deprecated endpoint host
+// name (see buzzapi.CheckServerURL).
+func CheckServerURL(server string) {
+	if _, err := buzzapi.CheckServerURL(server); err != nil {
+		Fail("%v", err)
+	}
+}
+
+// deprecatedMessage reports whether Buzz refused a request as deprecated (code
+// ApiDeprecated, on the response or on an item within it), and returns the server's
+// message, which says what to use instead.
+func deprecatedMessage(m map[string]any) (message string, refused bool) {
+	if ResponseCode(m) == "ApiDeprecated" {
+		message, refused = responseMessage(m), true
+	} else if item := Item(m); item.Code == "ApiDeprecated" {
+		message, refused = item.Message, true
+	}
+	if refused && message == "" {
+		message = "Buzz refused this request because it uses a deprecated API."
+	}
+	return message, refused
+}
+
+// FailIfDeprecated stops with the server's message if Buzz refused a request as
+// deprecated.  Buzz refuses a deprecated command, endpoint host name or sign-in for new
+// users and domains; trying again cannot help.
+func FailIfDeprecated(m map[string]any) {
+	if message, refused := deprecatedMessage(m); refused {
+		fmt.Println()
+		Fail("%s", message)
+	}
+}
+
 // ── Admin login (login3, with optional MFA) ─────────────────────────────────────
 var usernameRe = regexp.MustCompile(`^[^/]+/[^/]+$`)
 
 func AdminLogin(server string) string {
+	// Refuse a deprecated endpoint host name before asking for a password.
+	CheckServerURL(server)
+
 	for {
 		username := readAdminUsername()
 		password := PromptPassword("Admin password", "BUZZ_ADMIN_PASSWORD")
@@ -357,8 +397,8 @@ func AdminLogin(server string) string {
 		// short-lived token that is presented in an Authorization: Bearer header to
 		// secondfactorauthenticate, which returns the real session token.  Putting the
 		// token in the request body instead is ignored: AccessDenied userId='-1'.
-		//   https://api.agilixbuzz.com/docs/entry/Command/Login3.md
-		//   https://api.agilixbuzz.com/docs/entry/Command/SecondFactorAuthenticate.md
+		//   https://interactiveapi.agilixbuzz.com/docs/entry/Command/Login3.md
+		//   https://interactiveapi.agilixbuzz.com/docs/entry/Command/SecondFactorAuthenticate.md
 		if code == "SecondFactorConfigurationNowRequired" {
 			fmt.Print("\n  This account must configure multi-factor authentication before it can\n")
 			fmt.Print("  be used.  Complete MFA setup in Buzz, then re-run this script.\n")
@@ -386,6 +426,10 @@ func AdminLogin(server string) string {
 			}, partial)
 			code = ResponseCode(resp)
 		}
+
+		// Buzz refuses a deprecated endpoint host name or sign-in for new users and
+		// domains.  Trying again cannot help, so stop and show what to use instead.
+		FailIfDeprecated(resp)
 
 		if code != "OK" {
 			msg := responseMessage(resp)
